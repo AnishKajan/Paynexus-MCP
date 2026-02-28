@@ -177,6 +177,7 @@ jobs:
               --env-vars \
                 "PORT=3000" \
                 "MCP_ENV=demo" \
+                "PAYNEXUS_ENV=sandbox" \
                 "PAYNEXUS_API_URL=${API_URL}" \
               --output none
             echo "Container App created."
@@ -189,6 +190,7 @@ jobs:
               --set-env-vars \
                 "PORT=3000" \
                 "MCP_ENV=demo" \
+                "PAYNEXUS_ENV=sandbox" \
                 "PAYNEXUS_API_URL=${API_URL}" \
               --output none
 
