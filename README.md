@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./Group 9.png" alt="Paynexus Logo" width="220" />
+  <img src="[./Group 9.png](https://pub-d4ec8c246ffe4169a42b983e2d01c1dd.r2.dev/Paynexus-logo-cloudflare.png)" alt="Paynexus Logo" width="220" />
 </p>
 
 <h1 align="center">Paynexus MCP</h1>
