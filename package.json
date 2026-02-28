@@ -2,7 +2,7 @@
   "name": "@paynexus/mcp",
   "version": "1.0.0",
   "description": "AI Control Plane for Paynexus Backend",
-  "main": "dist/index.js",
+  "main": "dist/server.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -16,17 +16,21 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "dev:sdk": "tsx src/index.ts",
     "example": "tsx example.ts"
   },
   "dependencies": {
+    "@types/express": "^5.0.0",
+    "axios": "^1.7.0",
     "dotenv": "^16.4.5",
+    "express": "^5.0.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "typescript": "^5.3.3",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
   }
 }

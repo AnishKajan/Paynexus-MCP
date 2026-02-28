@@ -1,0 +1,248 @@
+# ============================================================
+#  Paynexus MCP — Build & Deploy to Azure Container Apps
+#
+#  Triggers:
+#    - Push to main when src/**, Dockerfile, or package.json change
+#    - Manually via workflow_dispatch
+#
+#  Steps (all idempotent — safe to re-run on fresh subscription):
+#    1. Azure OIDC login
+#    2. Build & push image to GHCR
+#    3. Ensure resource group (already exists — shared with backend)
+#    4. Ensure Container App Environment (shared with backend)
+#    5. Get backend FQDN → set as PAYNEXUS_API_URL
+#    6. Create or update paynexus-mcp Container App
+#    7. Health check gate
+#
+#  Required GitHub Secrets (Settings → Secrets → Actions):
+#    AZURE_CLIENT_ID        — same App registration as Paynexus backend
+#    AZURE_TENANT_ID        — same tenant
+#    AZURE_SUBSCRIPTION_ID  — same subscription
+#
+#  Azure federated credential must match:
+#    repo:AnishKajan/Paynexus-MCP:ref:refs/heads/main
+#  (separate from the credential for AnishKajan/Paynexus)
+# ============================================================
+
+name: Build & Deploy MCP to Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+env:
+  RESOURCE_GROUP: Paynexus
+  LOCATION: eastus2
+  CAE_NAME: cae-paynexus-prod
+  BACKEND_APP_NAME: paynexus-api
+  MCP_APP_NAME: paynexus-mcp
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy MCP
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 0. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. Azure OIDC login ──────────────────────────────────────────────────
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ── 2. Resolve image name (GHCR requires lowercase owner) ────────────────
+      - name: Resolve image name
+        id: image
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER}/${{ env.MCP_APP_NAME }}:latest"
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}"  >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE}"
+
+      # ── 3. Build & push to GHCR ─────────────────────────────────────────────
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 4. Ensure resource group (shared with backend — idempotent) ──────────
+      - name: Ensure resource group
+        run: |
+          az group create \
+            --name "${{ env.RESOURCE_GROUP }}" \
+            --location "${{ env.LOCATION }}" \
+            --output none
+          echo "Resource group '${{ env.RESOURCE_GROUP }}' ready."
+
+      # ── 5. Ensure Container App Environment (shared with backend) ────────────
+      - name: Ensure Container App Environment
+        run: |
+          EXISTS=$(az containerapp env show \
+            --name "${{ env.CAE_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "name" -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$EXISTS" ]; then
+            echo "ERROR: Container App Environment '${{ env.CAE_NAME }}' not found."
+            echo "Deploy the backend first: it creates the environment."
+            echo "Run the 'Deploy to Azure' workflow in the Paynexus repo."
+            exit 1
+          else
+            echo "Container App Environment '${{ env.CAE_NAME }}' found."
+          fi
+
+      # ── 6. Get backend FQDN → PAYNEXUS_API_URL ──────────────────────────────
+      - name: Get backend API URL
+        id: backend
+        run: |
+          FQDN=$(az containerapp show \
+            --name "${{ env.BACKEND_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null || echo "")
+
+          if [ -n "$FQDN" ]; then
+            URL="https://${FQDN}"
+          else
+            echo "WARNING: Backend Container App not found — using localhost fallback"
+            URL="http://localhost:3001"
+          fi
+
+          echo "api_url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Backend API URL: ${URL}"
+
+      # ── 7. Create or update paynexus-mcp Container App ──────────────────────
+      - name: Deploy paynexus-mcp
+        id: deploy
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="${{ steps.image.outputs.image }}"
+          API_URL="${{ steps.backend.outputs.api_url }}"
+
+          EXISTS=$(az containerapp show \
+            --name "${{ env.MCP_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "name" -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$EXISTS" ]; then
+            echo "Creating Container App ${{ env.MCP_APP_NAME }}..."
+            az containerapp create \
+              --name "${{ env.MCP_APP_NAME }}" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --environment "${{ env.CAE_NAME }}" \
+              --image "${IMAGE}" \
+              --registry-server "ghcr.io" \
+              --registry-username "${{ steps.image.outputs.owner }}" \
+              --registry-password "${GHCR_TOKEN}" \
+              --target-port 3000 \
+              --ingress external \
+              --min-replicas 0 \
+              --max-replicas 2 \
+              --cpu 0.25 \
+              --memory 0.5Gi \
+              --env-vars \
+                "PORT=3000" \
+                "MCP_ENV=demo" \
+                "PAYNEXUS_API_URL=${API_URL}" \
+              --output none
+            echo "Container App created."
+          else
+            echo "Updating ${{ env.MCP_APP_NAME }} with new image and backend URL..."
+            az containerapp update \
+              --name "${{ env.MCP_APP_NAME }}" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --image "${IMAGE}" \
+              --set-env-vars \
+                "PAYNEXUS_API_URL=${API_URL}" \
+              --output none
+            echo "Container App updated."
+          fi
+
+          FQDN=$(az containerapp show \
+            --name "${{ env.MCP_APP_NAME }}" \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+
+          echo "fqdn=${FQDN}" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "MCP URL: https://${FQDN}"
+
+      # ── 8. Job summary ───────────────────────────────────────────────────────
+      - name: Write job summary
+        run: |
+          FQDN="${{ steps.deploy.outputs.fqdn }}"
+          {
+            echo "### Paynexus MCP Deploy Complete"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **MCP URL** | https://${FQDN} |"
+            echo "| **Health** | https://${FQDN}/health |"
+            echo "| **Backend** | ${{ steps.backend.outputs.api_url }} |"
+            echo "| **Image** | \`${{ steps.image.outputs.image }}\` |"
+            echo ""
+            echo "#### Demo Flow"
+            echo "\`\`\`bash"
+            echo "# 1. Forward your Supabase JWT"
+            echo "curl -X POST https://${FQDN}/auth/forward -H 'Content-Type: application/json' -d '{\"jwt\":\"<supabase-jwt>\"}'"
+            echo ""
+            echo "# 2. Create an API key"
+            echo "curl -X POST https://${FQDN}/api-keys/create -H 'Content-Type: application/json' -d '{\"tag\":\"demo\"}'"
+            echo ""
+            echo "# 3. Create a checkout session"
+            echo "curl -X POST https://${FQDN}/checkout/demo -H 'Content-Type: application/json' -d '{\"amount\":4900,\"currency\":\"usd\"}'"
+            echo ""
+            echo "# 4. Register a webhook"
+            echo "curl -X POST https://${FQDN}/webhooks/create -H 'Content-Type: application/json' -d '{\"url\":\"https://webhook.site/demo\",\"events\":[\"checkout.confirmed\"]}'"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 9. Health check ──────────────────────────────────────────────────────
+      - name: Health check
+        run: |
+          FQDN="${{ steps.deploy.outputs.fqdn }}"
+          URL="https://${FQDN}/health"
+          echo "Polling ${URL} (18 attempts × 10s = 3 min max)..."
+          for i in $(seq 1 18); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${URL}" 2>/dev/null || echo "000")
+            echo "  [${i}/18] HTTP ${STATUS}"
+            if [ "$STATUS" = "200" ]; then
+              echo "MCP Service is healthy!"
+              curl -s "${URL}" | python3 -m json.tool || true
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ERROR: MCP not healthy after 3 minutes."
+          echo "Check: az containerapp logs show --name ${{ env.MCP_APP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} --follow"
+          exit 1
