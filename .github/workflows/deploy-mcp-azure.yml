@@ -19,6 +19,10 @@
 #    AZURE_TENANT_ID        — same tenant
 #    AZURE_SUBSCRIPTION_ID  — same subscription
 #
+#  NOTE: GHCR package must be set to Public (Package Settings → Change visibility).
+#        No registry credentials are stored — GITHUB_TOKEN expires after each run
+#        and public images pull without authentication.
+#
 #  Azure federated credential must match:
 #    repo:AnishKajan/Paynexus-MCP:ref:refs/heads/main
 #  (separate from the credential for AnishKajan/Paynexus)
@@ -144,10 +148,10 @@ jobs:
           echo "Backend API URL: ${URL}"
 
       # ── 7. Create or update paynexus-mcp Container App ──────────────────────
+      # NOTE: No registry credentials — GHCR package must be set to Public.
+      #       GITHUB_TOKEN expires after each run; public packages need no auth.
       - name: Deploy paynexus-mcp
         id: deploy
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           IMAGE="${{ steps.image.outputs.image }}"
           API_URL="${{ steps.backend.outputs.api_url }}"
@@ -164,9 +168,6 @@ jobs:
               --resource-group "${{ env.RESOURCE_GROUP }}" \
               --environment "${{ env.CAE_NAME }}" \
               --image "${IMAGE}" \
-              --registry-server "ghcr.io" \
-              --registry-username "${{ steps.image.outputs.owner }}" \
-              --registry-password "${GHCR_TOKEN}" \
               --target-port 3000 \
               --ingress external \
               --min-replicas 0 \
@@ -186,8 +187,18 @@ jobs:
               --resource-group "${{ env.RESOURCE_GROUP }}" \
               --image "${IMAGE}" \
               --set-env-vars \
+                "PORT=3000" \
+                "MCP_ENV=demo" \
                 "PAYNEXUS_API_URL=${API_URL}" \
               --output none
+
+            # Remove stale registry credentials (GITHUB_TOKEN expires each run)
+            az containerapp registry remove \
+              --name "${{ env.MCP_APP_NAME }}" \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --server "ghcr.io" \
+              --output none 2>/dev/null || echo "No registry credential to remove."
+
             echo "Container App updated."
           fi
 
